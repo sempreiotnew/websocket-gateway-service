@@ -1,5 +1,3 @@
-import { OnModuleInit } from '@nestjs/common';
-
 import {
   OnGatewayConnection,
   OnGatewayDisconnect,
@@ -9,32 +7,20 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { NatsService } from 'src/nats/nats.service';
+import { SocketPayload } from './socket.types';
+import { NATS_ACRONYM, WS_ACRONYM } from 'src/constants';
 
 @WebSocketGateway(3005, {
   cors: {
     origin: '*',
   },
 })
-export class SocketGateway
-  implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit
-{
+export class SocketGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(private readonly natsService: NatsService) {}
 
   @WebSocketServer()
   server: Server;
 
-  async onModuleInit() {
-    await this.natsService.subscribeNATS('nats.>', (data) => {
-      console.log(`📥 NATS subscribed nats.> ${data.userId}`);
-      console.log(data);
-    });
-  }
-  private async waitForNats() {
-    while (!this.natsService['natsConnection']) {
-      console.log('⏳ Waiting for NATS to connect...');
-      await new Promise((res) => setTimeout(res, 100));
-    }
-  }
   async handleConnection(client: Socket) {
     const clientId = client.handshake.query.clientId as string;
     if (!clientId) {
@@ -43,45 +29,49 @@ export class SocketGateway
       return;
     }
 
-    console.log(`🔌 Client ${client.id} connected as user ${clientId}`);
+    console.log(
+      `🔥 [WEBSOCKET] Client ${client.id} connected as user ${clientId}`,
+    );
 
-    // Subscribe to personal topic
-    const topic = `nats.user.${clientId}`;
+    const topic = `${NATS_ACRONYM}${clientId}`;
+    const room = `${WS_ACRONYM}${clientId}`;
+    console.log(topic);
+    console.log(room);
 
-    await this.natsService.subscribeNATS(topic, (data) => {
-      console.log(`📥 Message for user ${clientId}:`, data);
-      client.emit('personal', data);
+    client.join(room);
+
+    this.natsService.subscribeNATS(topic, (data) => {
+      this.server.emit(`${WS_ACRONYM}${clientId}`, {
+        ...data,
+        sent: true,
+      });
     });
 
-    // Store the subscription ID in client data for cleanup
-    // client.data.subscriptions = [topic];
-    // console.log(client.data.subscriptions);
+    this.natsService.subscribeNATS('nats.broadcast', (payload: any) => {
+      console.log('BROADCAST');
+      console.log(payload);
+    });
   }
 
   handleDisconnect(client: Socket) {
     console.log(`Client disconnected: ${client.id}`);
     const clientId = client.handshake.query.clientId as string;
     console.log(`Unsubscribing: ${clientId}`);
-    this.natsService.unsubscribeNATS(`nats.user.${clientId}`);
-    // if (client.data.subscriptions) {
-    //   client.data.subscriptions.forEach((sub) => {
-    //     this.natsService.unsubscribe('', sub); // implement unsubscribe in NatsService
-    //   });
-    // }
+    this.natsService.unsubscribeNATS(`${NATS_ACRONYM}${clientId}`);
   }
 
   @SubscribeMessage('sendToUser')
-  async sendToUser(client: Socket, payload: { userId: string; message: any }) {
-    console.log('🔥 WEBSOCKET -> sendToUser');
+  async sendToUser(client: Socket, payload: SocketPayload) {
     console.log(payload);
-    await this.natsService.publishNats(`nats.user.${payload.userId}`, {
-      userId: payload.userId,
-      message: payload.message,
-    });
+    await this.natsService.publishNats(
+      `${NATS_ACRONYM}${payload.userId}`,
+      payload,
+    );
   }
 
   @SubscribeMessage('sendBroadcast')
-  async sendBroadcast(client: Socket, message: any) {
-    await this.natsService.publishNats('nats.broadcast', message);
+  async sendBroadcast(client: Socket, payload: SocketPayload) {
+    console.log('🔥 [WEBSOCKET] -> sendBroadcast');
+    await this.natsService.publishNats('nats.broadcast', payload.message);
   }
 }
